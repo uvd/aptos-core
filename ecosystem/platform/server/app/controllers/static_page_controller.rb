@@ -14,6 +14,8 @@ class StaticPageController < ApplicationController
   layout 'it2', only: [:community]
   before_action :set_cache_headers
 
+  def root; end
+
   def community
     @login_dialog = DialogComponent.new(id: 'login_dialog')
   end
