@@ -20,6 +20,12 @@ class StaticPageController < ApplicationController
     @login_dialog = DialogComponent.new(id: 'login_dialog')
   end
 
+  def terms; end
+
+  def terms_testnet; end
+
+  def privacy; end
+
   private
 
   def set_cache_headers
