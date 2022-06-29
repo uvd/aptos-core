@@ -26,6 +26,8 @@ class StaticPageController < ApplicationController
 
   def privacy; end
 
+  def developers; end
+
   private
 
   def set_cache_headers

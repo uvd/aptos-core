@@ -32,28 +32,35 @@ Rails.application.routes.draw do
   get 'onboarding/kyc_redirect', to: 'onboarding#kyc_redirect'
   get 'onboarding/kyc_callback', to: 'onboarding#kyc_callback'
 
+  # Onboarding
   get 'onboarding/email'
   get 'onboarding/email_success'
   post 'onboarding/email', to: 'onboarding#email_update'
 
+  # Health check
   get 'health', to: 'health#health'
 
+  # IT2
   resources :it2_profiles, except: %i[index destroy]
   resources :it2_surveys, except: %i[index destroy]
   resource :it2, only: %i[show]
 
+  # NFTs
   resources :nfts, only: %i[show update]
   resources :nft_offers, only: %i[show update]
-
   get 'nft-nyc', to: 'nft_nyc#show'
 
+  # Leaderboards
   get 'leaderboard/it1', to: redirect('/it1')
 
+  # IT1
   get 'it1', to: 'leaderboard#it1'
 
+  # Static pages
   get 'community', to: 'static_page#community'
   get 'terms', to: 'static_page#terms'
   get 'terms-testnet', to: 'static_page#terms_testnet'
   get 'privacy', to: 'static_page#privacy'
+  get 'developers', to: 'static_page#developers'
   root 'static_page#root'
 end
