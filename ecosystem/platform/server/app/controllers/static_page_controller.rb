@@ -28,6 +28,14 @@ class StaticPageController < ApplicationController
 
   def developers; end
 
+  def currents
+    @feed = Rails.cache.fetch(:currents_posts, expires_in: 1.hour) do
+      rss = HTTParty.get('https://medium.com/feed/@aptoslabs')
+      RSS::Parser.parse(rss.body)
+    end
+    @article_html = @feed.items.first.content_encoded.html_safe
+  end
+
   private
 
   def set_cache_headers
