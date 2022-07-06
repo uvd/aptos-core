@@ -17,17 +17,19 @@ pub mod backup;
 pub mod errors;
 pub mod metrics;
 pub mod schema;
+pub mod state_store;
 
 mod change_set;
 mod db_options;
 mod event_store;
 mod ledger_counters;
 mod ledger_store;
+mod lru_node_cache;
 mod pruner;
 mod state_merkle_db;
-mod state_store;
 mod system_store;
 mod transaction_store;
+mod versioned_node_cache;
 
 #[cfg(test)]
 mod aptosdb_test;
@@ -715,6 +717,11 @@ impl AptosDB {
         if let Some(pruner) = self.pruner.as_ref() {
             pruner.maybe_wake_pruner(latest_version)
         }
+    }
+
+    #[cfg(feature = "fuzzing")]
+    pub fn state_store(&self) -> Arc<StateStore> {
+        self.state_store.clone()
     }
 }
 

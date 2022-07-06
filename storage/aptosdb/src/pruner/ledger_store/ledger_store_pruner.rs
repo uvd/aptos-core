@@ -45,6 +45,10 @@ impl DBPruner for LedgerPruner {
         // more than max_version in one go.
         let current_target_version = self.get_currrent_batch_target(max_versions);
 
+        println!(
+            "{}, {}, {}",
+            min_readable_version, current_target_version, max_versions
+        );
         self.transaction_store_pruner.prune(
             db_batch,
             min_readable_version,
