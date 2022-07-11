@@ -12,6 +12,7 @@ mod error;
 mod logging;
 pub mod metrics;
 mod notification_handlers;
+mod persistent_metadata_storage;
 mod storage_synchronizer;
 mod utils;
 

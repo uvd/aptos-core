@@ -8,6 +8,7 @@ use crate::{
         CommitNotificationListener, ConsensusNotificationHandler, ErrorNotificationListener,
         MempoolNotificationHandler,
     },
+    persistent_metadata_storage::PersistentMetadataStorage,
     storage_synchronizer::StorageSynchronizer,
 };
 use aptos_config::config::NodeConfig;
@@ -73,6 +74,9 @@ impl DriverFactory {
         };
 
         // Create the storage synchronizer
+        let persistent_metadata_storage = Arc::new(Mutex::new(PersistentMetadataStorage::new(
+            node_config.storage.dir(),
+        )));
         let event_subscription_service = Arc::new(Mutex::new(event_subscription_service));
         let (storage_synchronizer, _, _) = StorageSynchronizer::new(
             node_config.state_sync.state_sync_driver,
@@ -81,6 +85,7 @@ impl DriverFactory {
             error_notification_sender,
             event_subscription_service.clone(),
             mempool_notification_handler.clone(),
+            persistent_metadata_storage.clone(),
             storage.clone(),
             driver_runtime.as_ref(),
         );
@@ -101,6 +106,7 @@ impl DriverFactory {
             error_notification_listener,
             event_subscription_service,
             mempool_notification_handler,
+            persistent_metadata_storage,
             storage_synchronizer,
             aptos_data_client,
             streaming_service_client,

@@ -226,7 +226,9 @@ fn spawn_telemetry_event_sender(
         // Process the response
         match send_result {
             Ok(response) => {
-                let status_code = response.status().as_u16();
+                let status_code = response.status();
+                let x = status_code.is_success();
+
                 if status_code > 200 && status_code < 299 {
                     debug!(
                         "Sent telemetry event {}, data: {:?}",

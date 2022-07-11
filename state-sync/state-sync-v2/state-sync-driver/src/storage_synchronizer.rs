@@ -8,6 +8,7 @@ use crate::{
     notification_handlers::{
         CommitNotification, CommittedTransactions, ErrorNotification, MempoolNotificationHandler,
     },
+    persistent_metadata_storage::PersistentMetadataStorage,
     utils,
 };
 use aptos_config::config::StateSyncDriverConfig;
@@ -35,7 +36,7 @@ use std::{
 use storage_interface::{DbReader, DbReaderWriter};
 use tokio::{
     runtime::{Handle, Runtime},
-    task::{yield_now, JoinHandle},
+    task::JoinHandle,
 };
 
 /// Synchronizes the storage of the node by verifying and storing new data
@@ -115,6 +116,9 @@ pub struct StorageSynchronizer<ChunkExecutor> {
     // The number of storage data chunks pending execute/apply, or commit
     pending_data_chunks: Arc<AtomicU64>,
 
+    // The persistent storage to write metadata about the sync progress
+    persistent_metadata_storage: Arc<Mutex<PersistentStorage>>,
+
     // An optional runtime on which to spawn the storage synchronizer threads
     runtime: Option<Handle>,
 
@@ -136,6 +140,7 @@ impl<ChunkExecutor: ChunkExecutorTrait + 'static> Clone for StorageSynchronizer<
             error_notification_sender: self.error_notification_sender.clone(),
             executor_notifier: self.executor_notifier.clone(),
             pending_data_chunks: self.pending_data_chunks.clone(),
+            persistent_metadata_storage: self.persistent_metadata_storage.clone(),
             runtime: self.runtime.clone(),
             state_snapshot_notifier: self.state_snapshot_notifier.clone(),
             storage: self.storage.clone(),
@@ -152,6 +157,7 @@ impl<ChunkExecutor: ChunkExecutorTrait + 'static> StorageSynchronizer<ChunkExecu
         error_notification_sender: mpsc::UnboundedSender<ErrorNotification>,
         event_subscription_service: Arc<Mutex<EventSubscriptionService>>,
         mempool_notification_handler: MempoolNotificationHandler<MempoolNotifier>,
+        persistent_metadata_storage: Arc<Mutex<PersistentStorage>>,
         storage: DbReaderWriter,
         runtime: Option<&Runtime>,
     ) -> (Self, JoinHandle<()>, JoinHandle<()>) {
@@ -199,6 +205,7 @@ impl<ChunkExecutor: ChunkExecutorTrait + 'static> StorageSynchronizer<ChunkExecu
             error_notification_sender,
             executor_notifier,
             pending_data_chunks: pending_transaction_chunks,
+            persistent_metadata_storage,
             runtime,
             state_snapshot_notifier: None,
             storage,
@@ -274,6 +281,7 @@ impl<ChunkExecutor: ChunkExecutorTrait + 'static> StorageSynchronizerInterface
             self.commit_notification_sender.clone(),
             self.error_notification_sender.clone(),
             self.pending_data_chunks.clone(),
+            self.persistent_metadata_storage.clone(),
             self.storage.clone(),
             epoch_change_proofs,
             target_ledger_info,
@@ -413,7 +421,6 @@ fn spawn_executor<ChunkExecutor: ChunkExecutorTrait + 'static>(
                             decrement_pending_data_chunks(pending_transaction_chunks.clone());
                         }
                     }
-                    yield_thread().await;
                 }
             }
         }
@@ -483,7 +490,6 @@ fn spawn_committer<
                         }
                     };
                     decrement_pending_data_chunks(pending_transaction_chunks.clone());
-                    yield_thread().await;
                 }
             }
         }
@@ -500,6 +506,7 @@ fn spawn_state_snapshot_receiver<ChunkExecutor: ChunkExecutorTrait + 'static>(
     mut commit_notification_sender: mpsc::UnboundedSender<CommitNotification>,
     error_notification_sender: mpsc::UnboundedSender<ErrorNotification>,
     pending_transaction_chunks: Arc<AtomicU64>,
+    persistent_metadata_storage: Arc<Mutex<PersistentMetadataStorage>>,
     storage: DbReaderWriter,
     epoch_change_proofs: Vec<LedgerInfoWithSignatures>,
     target_ledger_info: LedgerInfoWithSignatures,
@@ -550,20 +557,17 @@ fn spawn_state_snapshot_receiver<ChunkExecutor: ChunkExecutorTrait + 'static>(
                                     );
 
                                     if !all_states_synced {
-                                        // Send a commit notification to the listener
-                                        let commit_notification = CommitNotification::new_committed_states(all_states_synced, last_committed_state_index, None);
-                                        if let Err(error) = commit_notification_sender.send(commit_notification).await {
-                                            let error = format!("Failed to send state commit notification! Error: {:?}", error);
+                                        // Update the persistent metadata storage with the last committed state index
+                                        if let Err(error) = persistent_metadata_storage.lock().update_last_persisted_state_value_index(version, last_committed_state_index, all_states_synced) {
+                                            let error = format!("Failed to update the last persisted state index! Error: {:?}", error);
                                             send_storage_synchronizer_error(error_notification_sender.clone(), notification_id, error).await;
                                         }
-
                                         decrement_pending_data_chunks(pending_transaction_chunks.clone());
-                                        yield_thread().await;
                                         continue; // Wait for the next chunk
                                     }
 
                                     // All states have been synced! Create a new commit notification
-                                    let commit_notification = create_final_commit_notification(&target_output_with_proof, last_committed_state_index);
+                                    let commit_notification = create_commit_notification(&target_output_with_proof, last_committed_state_index);
 
                                     // Finalize storage, reset the executor and send a commit
                                     // notification to the listener.
@@ -575,8 +579,10 @@ fn spawn_state_snapshot_receiver<ChunkExecutor: ChunkExecutorTrait + 'static>(
                                         Err(format!("Failed to save all epoch ending ledger infos! Error: {:?}", error))
                                     } else if let Err(error) = storage.writer.delete_genesis() {
                                         Err(format!("Failed to delete the genesis transaction! Error: {:?}", error))
+                                    } else if let Err(error) = persistent_metadata_storage.lock().update_last_persisted_state_value_index(version, last_committed_state_index, all_states_synced) {
+                                        Err(format!("All states have synced, but failed to update the persistent metadata storage! Error: {:?}", error))
                                     } else if let Err(error) = chunk_executor.reset() {
-                                        Err(format!("Failed to reset the chunk executor after states synchronization! Error: {:?}", error))
+                                        Err(format!("Failed to reset the chunk executor after state snapshot synchronization! Error: {:?}", error))
                                     } else if let Err(error) = commit_notification_sender.send(commit_notification).await {
                                        Err(format!("Failed to send the final state commit notification! Error: {:?}", error))
                                     } else if let Err(error) = utils::initialize_sync_gauges(storage.reader) {
@@ -612,8 +618,8 @@ fn spawn_state_snapshot_receiver<ChunkExecutor: ChunkExecutorTrait + 'static>(
     spawn(runtime, receiver)
 }
 
-/// Creates a final commit notification for the last states chunk
-fn create_final_commit_notification(
+/// Creates a commit notification for the new committed state snapshot
+fn create_commit_notification(
     target_output_with_proof: &TransactionOutputListWithProof,
     last_committed_state_index: u64,
 ) -> CommitNotification {
@@ -627,14 +633,10 @@ fn create_final_commit_notification(
         .into_iter()
         .flat_map(|output| output.events().to_vec())
         .collect::<Vec<_>>();
-    let committed_transaction = CommittedTransactions {
+    CommitNotification::new_committed_state_snapshot(
         events,
         transactions,
-    };
-    CommitNotification::new_committed_states(
-        true,
         last_committed_state_index,
-        Some(committed_transaction),
     )
 }
 
@@ -699,15 +701,4 @@ async fn send_storage_synchronizer_error(
 
     // Update the metrics
     metrics::increment_counter(&metrics::STORAGE_SYNCHRONIZER_ERRORS, error.get_label());
-}
-
-/// This yields the currently executing thread. This is required
-/// to avoid starvation of other threads when the system is under
-/// heavy load (see: https://github.com/aptos-labs/aptos-core/issues/623).
-///
-/// TODO(joshlind): identify a better solution. It likely requires
-/// using spawn_blocking() at a lower level, or merging runtimes.
-async fn yield_thread() {
-    // We have a 50% chance of yielding here.
-    sample!(SampleRate::Frequency(2), yield_now().await;);
 }

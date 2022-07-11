@@ -296,7 +296,7 @@ async fn test_initialize_state_synchronizer() {
         .unwrap();
     assert_matches!(
         commit_listener.select_next_some().await,
-        CommitNotification::CommittedStates(_)
+        CommitNotification::CommittedStateSnapshot(_)
     );
 }
 
@@ -611,7 +611,7 @@ async fn verify_state_commit_notification(
     expected_all_synced: bool,
     expected_committed_transactions: Option<CommittedTransactions>,
 ) {
-    let CommitNotification::CommittedStates(committed_states) =
+    let CommitNotification::CommittedStateSnapshot(committed_states) =
         commit_listener.select_next_some().await;
     assert_eq!(committed_states.all_states_synced, expected_all_synced);
     assert_eq!(

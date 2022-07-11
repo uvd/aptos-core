@@ -5,13 +5,15 @@ use crate::{
     driver::DriverConfiguration,
     error::Error,
     logging::{LogEntry, LogSchema},
-    notification_handlers::CommittedStates,
+    notification_handlers::CommittedStateSnapshot,
+    persistent_metadata_storage::PersistentMetadataStorage,
     storage_synchronizer::StorageSynchronizerInterface,
     utils,
     utils::{SpeculativeStreamState, PENDING_DATA_LOG_FREQ_SECS},
 };
 use aptos_config::config::BootstrappingMode;
 use aptos_data_client::GlobalDataSummary;
+use aptos_infallible::Mutex;
 use aptos_logger::{
     prelude::*,
     sample::{SampleRate, Sampling},
@@ -32,6 +34,9 @@ use data_streaming_service::{
 use futures::channel::oneshot;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use storage_interface::DbReader;
+
+/// The expected version of the genesis transaction
+pub const GENESIS_TRANSACTION_VERSION: u64 = 0;
 
 /// A simple container for verified epoch states and epoch ending ledger infos
 /// that have been fetched from the network.
@@ -227,21 +232,13 @@ impl VerifiedEpochStates {
     }
 }
 
-// TODO(joshlind): persist the index (e.g., in case we crash mid-download)?
 /// A simple container to manage data related to state value snapshot syncing
 struct StateValueSyncer {
     // Whether or not a state snapshot receiver has been initialized
     initialized_state_snapshot_receiver: bool,
 
-    // Whether or not all states have been synced
-    is_sync_complete: bool,
-
     // The epoch ending ledger info for the version we're syncing
     ledger_info_to_sync: Option<LedgerInfoWithSignatures>,
-
-    // The next state value index to commit (all state values before this have been
-    // committed).
-    next_state_index_to_commit: u64,
 
     // The next state value index to process (all state values before this have been
     // processed -- i.e., sent to the storage synchronizer).
@@ -255,18 +252,15 @@ impl StateValueSyncer {
     pub fn new() -> Self {
         Self {
             initialized_state_snapshot_receiver: false,
-            is_sync_complete: false,
             ledger_info_to_sync: None,
-            next_state_index_to_commit: 0,
             next_state_index_to_process: 0,
             transaction_output_to_sync: None,
         }
     }
 
-    /// Resets all speculative state related to state value syncing (i.e., all
-    /// speculative data that has not been successfully committed to storage)
-    pub fn reset_speculative_state(&mut self) {
-        self.next_state_index_to_process = self.next_state_index_to_commit
+    /// Updates the next state index to process
+    pub fn update_next_state_index_to_process(&mut self, next_state_index_to_process: u64) {
+        self.next_state_index_to_process = next_state_index_to_process;
     }
 }
 
@@ -283,6 +277,9 @@ pub struct Bootstrapper<StorageSyncer, StreamingClient> {
 
     // The config of the state sync driver
     driver_configuration: DriverConfiguration,
+
+    // The persistent storage to write metadata about the sync progress
+    persistent_metadata_storage: Arc<Mutex<PersistentMetadataStorage>>,
 
     // The speculative state tracking the active data stream
     speculative_stream_state: Option<SpeculativeStreamState>,
@@ -310,6 +307,7 @@ impl<
 {
     pub fn new(
         driver_configuration: DriverConfiguration,
+        persistent_metadata_storage: Arc<Mutex<PersistentMetadataStorage>>,
         streaming_client: StreamingClient,
         storage: Arc<dyn DbReader>,
         storage_synchronizer: StorageSyncer,
@@ -325,6 +323,7 @@ impl<
             bootstrap_notifier_channel: None,
             bootstrapped: false,
             driver_configuration,
+            persistent_metadata_storage,
             speculative_stream_state: None,
             streaming_client,
             storage,
@@ -434,22 +433,40 @@ impl<
         let highest_known_ledger_info = self.get_highest_known_ledger_info()?;
         let highest_known_ledger_version = highest_known_ledger_info.ledger_info().version();
 
-        // Check if we've already fetched the required data for bootstrapping.
-        // If not, bootstrap according to the mode.
+        // If we've synced to the highest known, there's nothing left to do
+        if highest_synced_version >= highest_known_ledger_version {
+            return self.bootstrapping_complete();
+        }
+
+        // Bootstrap according to the mode
         match self.driver_configuration.config.bootstrapping_mode {
             BootstrappingMode::DownloadLatestStates => {
-                if (self.state_value_syncer.ledger_info_to_sync.is_none()
-                    && highest_synced_version >= highest_known_ledger_version)
-                    || self.state_value_syncer.is_sync_complete
-                {
-                    return self.bootstrapping_complete();
+                // Check if it's more efficient to sync all transactions (instead of a new snapshot)
+                if highest_synced_version != GENESIS_TRANSACTION_VERSION {
+                    let num_versions_behind = highest_known_ledger_version
+                        .checked_sub(highest_synced_version)
+                        .ok_or_else(|| {
+                            Error::IntegerOverflow(
+                                "The number of versions behind has overflown!".into(),
+                            )
+                        })?;
+                    if num_versions_behind
+                        < self
+                            .driver_configuration
+                            .config
+                            .num_versions_to_skip_snapshot_sync
+                    {
+                        return self.bootstrapping_complete(); // Skip the state snapshot sync
+                    } else {
+                        panic!("Snapshot syncing is currently unsupported for nodes with existing state! \
+                        You are currently {:?} versions behind the latest snapshot version ({:?}). Either: (i) select a \
+                        different syncing mode; or (ii) delete your storage and restart your node.", num_versions_behind, highest_known_ledger_version);
+                    }
                 }
+
                 self.fetch_all_state_values(highest_known_ledger_info).await
             }
             _ => {
-                if highest_synced_version >= highest_known_ledger_version {
-                    return self.bootstrapping_complete();
-                }
                 self.fetch_missing_transaction_data(
                     highest_synced_version,
                     highest_known_ledger_info,
@@ -546,9 +563,10 @@ impl<
             self.state_value_syncer.ledger_info_to_sync = Some(highest_known_ledger_info.clone());
         }
 
-        // Fetch the transaction info first, before the states
+        // Fetch the data that we're missing
         let highest_known_ledger_version = highest_known_ledger_info.ledger_info().version();
         let data_stream = if self.state_value_syncer.transaction_output_to_sync.is_none() {
+            // Fetch the transaction info first, before the states
             self.streaming_client
                 .get_all_transaction_outputs(
                     highest_known_ledger_version,
@@ -557,9 +575,30 @@ impl<
                 )
                 .await?
         } else {
-            let start_index = Some(self.state_value_syncer.next_state_index_to_commit);
+            // Get the last persisted state value index in storage
+            let last_persisted_state_index = self
+                .persistent_metadata_storage
+                .lock()
+                .get_last_persisted_state_value_index(highest_known_ledger_version)
+                .map_err(|error| {
+                    Error::StorageError(format!(
+                        "Failed to get the last persisted state value index from metadata storage: {:?}",
+                        error
+                    ))
+                })? as u64;
+
+            // Fetch the missing state values
+            let next_state_index_to_process =
+                last_persisted_state_index.checked_add(1).ok_or_else(|| {
+                    Error::IntegerOverflow("The next state index to process has overflown!".into())
+                })?;
+            self.state_value_syncer
+                .update_next_state_index_to_process(next_state_index_to_process);
             self.streaming_client
-                .get_all_state_values(highest_known_ledger_version, start_index)
+                .get_all_state_values(
+                    highest_known_ledger_version,
+                    Some(next_state_index_to_process),
+                )
                 .await?
         };
         self.active_data_stream = Some(data_stream);
@@ -647,7 +686,7 @@ impl<
                     Error::IntegerOverflow("The highest local epoch end has overflown!".into())
                 })?
         } else {
-            unreachable!("Genesis should always end epoch 0!");
+            unreachable!("Genesis should always end the first epoch!");
         };
 
         // Compare the highest local epoch end to the highest advertised epoch end
@@ -1239,34 +1278,6 @@ impl<
             notification_feedback,
         )
         .await
-    }
-
-    /// Handles a notification from the driver that new state values have been
-    /// committed to storage.
-    pub fn handle_committed_state_values(
-        &mut self,
-        committed_states: CommittedStates,
-    ) -> Result<(), Error> {
-        // Update the last committed state value index
-        self.state_value_syncer.next_state_index_to_commit = committed_states
-            .last_committed_state_index
-            .checked_add(1)
-            .ok_or_else(|| {
-                Error::IntegerOverflow("The next state value index to commit has overflown!".into())
-            })?;
-
-        // Check if we've downloaded all state values
-        if committed_states.all_states_synced {
-            info!(LogSchema::new(LogEntry::Bootstrapper).message(&format!(
-                "Successfully synced all state values at version: {:?}. \
-                Last committed index: {:?}",
-                self.state_value_syncer.ledger_info_to_sync,
-                committed_states.last_committed_state_index
-            )));
-            self.state_value_syncer.is_sync_complete = true;
-        }
-
-        Ok(())
     }
 
     /// Returns the speculative stream state. Assumes that the state exists.

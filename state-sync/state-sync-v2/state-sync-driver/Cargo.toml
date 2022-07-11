@@ -10,7 +10,10 @@ publish = false
 edition = "2018"
 
 [dependencies]
+anyhow = "1.0.52"
 futures = "0.3.21"
+num-derive = "0.3.3"
+num-traits = "0.2.15"
 once_cell = "1.10.0"
 serde = { version = "1.0.137", default-features = false }
 thiserror = "1.0.31"
@@ -30,6 +33,7 @@ data-streaming-service = { path = "../data-streaming-service" }
 event-notifications = { path = "../../inter-component/event-notifications" }
 executor-types = { path = "../../../execution/executor-types" }
 mempool-notifications = { path = "../../inter-component/mempool-notifications" }
+schemadb = { path = "../../../storage/schemadb" }
 scratchpad = { path = "../../../storage/scratchpad" }
 storage-interface = { path = "../../../storage/storage-interface" }
 
