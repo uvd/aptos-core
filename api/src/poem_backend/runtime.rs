@@ -1,17 +1,21 @@
-use aptos_config::config::NodeConfig;
-use poem::{listener::TcpListener, Route, Server};
-use poem_openapi::OpenApiService;
-use tokio::runtime::Runtime;
+// Copyright (c) Aptos
+// SPDX-License-Identifier: Apache-2.0
 
 use super::api::Api;
+use crate::context::Context;
+use aptos_config::config::NodeConfig;
+use poem::{listener::TcpListener, Route, Server};
+use poem_openapi::{LicenseObject, OpenApiService};
+use tokio::runtime::Runtime;
 
-pub fn attach_poem_to_runtime(runtime: &Runtime, config: &NodeConfig) -> anyhow::Result<()> {
-    let api = Api {};
+pub fn attach_poem_to_runtime(
+    runtime: &Runtime,
+    context: Context,
+    config: &NodeConfig,
+) -> anyhow::Result<()> {
+    let api = Api::new(context);
 
-    // todo make this configurable
-    let api_endpoint = "/".to_string();
     let api_service = build_openapi_service(api);
-    let ui = api_service.swagger_ui();
     let spec_json = api_service.spec_endpoint();
     let spec_yaml = api_service.spec_endpoint_yaml();
 
@@ -21,10 +25,12 @@ pub fn attach_poem_to_runtime(runtime: &Runtime, config: &NodeConfig) -> anyhow:
         Server::new(TcpListener::bind(address))
             .run(
                 Route::new()
-                    .nest(api_endpoint, api_service)
-                    .nest("/spec.html", ui)
-                    .at("/spec.yaml", spec_json)
-                    .at("/spec.json", spec_yaml),
+                    .nest("/", api_service)
+                    // TODO: I prefer "spec" here but it's not backwards compatible.
+                    // Consider doing it later if we cut over to this entirely.
+                    // TODO: Consider making these part of the API itself.
+                    .at("/openapi.json", spec_json)
+                    .at("/openapi.yaml", spec_yaml),
             )
             .await
             .map_err(anyhow::Error::msg)
@@ -34,6 +40,13 @@ pub fn attach_poem_to_runtime(runtime: &Runtime, config: &NodeConfig) -> anyhow:
 }
 
 pub fn build_openapi_service(api: Api) -> OpenApiService<Api, ()> {
+    // TODO: This returns the version of the top level crate, not this crate.
+    // We should find another way to do versioning than just the crate.
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
+    let license =
+        LicenseObject::new("Apache 2.0").url("https://www.apache.org/licenses/LICENSE-2.0.html");
     OpenApiService::new(api, "Aptos Node API", version)
+        .description("The Aptos Node API is a RESTful API for client applications to interact with the Aptos blockchain.")
+        .license(license)
+        .external_document("https://github.com/aptos-labs/aptos-core")
 }
