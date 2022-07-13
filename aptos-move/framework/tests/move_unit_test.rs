@@ -5,8 +5,8 @@ use aptos_types::account_config::CORE_CODE_ADDRESS;
 use aptos_vm::move_vm_ext::test_transaction_context_natives;
 use framework::path_in_crate;
 use move_deps::{
-    move_cli::package::cli, move_stdlib, move_table_extension, move_unit_test::UnitTestingConfig,
-    move_vm_runtime::native_functions::NativeFunctionTable,
+    move_cli::package::cli, move_stdlib, move_table_extension, move_unit_test::{UnitTestingConfig, extensions},
+    move_vm_runtime::{native_functions::NativeFunctionTable, native_extensions::NativeContextExtensions},
 };
 use tempfile::tempdir;
 
