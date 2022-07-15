@@ -13,7 +13,7 @@ use aptos_types::{
     event::EventKey,
     state_store::state_key::StateKey,
     transaction::{ChangeSet, SignatureCheckedTransaction},
-    write_set::{WriteOp, WriteSetMut},
+    write_set::{WriteOp, WriteSetMut, WriteSet},
 };
 use move_deps::{
     move_binary_format::errors::{Location, VMResult},
@@ -31,6 +31,8 @@ use std::{
     convert::{TryFrom, TryInto},
     ops::{Deref, DerefMut},
 };
+
+use super::NativeAggregatorContext;
 
 #[derive(BCSCryptoHash, CryptoHasher, Deserialize, Serialize)]
 pub enum SessionId {
@@ -105,11 +107,14 @@ where
         let table_change_set = table_context
             .into_change_set()
             .map_err(|e| e.finish(Location::Undefined))?;
+        let aggregator_context: NativeAggregatorContext = extensions.remove();
+        let aggregator_change_set = aggregator_context.into_change_set();
 
         Ok(SessionOutput {
             change_set,
             events,
             table_change_set,
+            aggregator_change_set,
         })
     }
 }
@@ -132,6 +137,9 @@ pub struct SessionOutput {
     pub change_set: MoveChangeSet,
     pub events: Vec<MoveEvent>,
     pub table_change_set: TableChangeSet,
+
+    // Temporary chage set: will be changed to something nicer soon :)
+    pub aggregator_change_set: WriteSet,
 }
 
 impl SessionOutput {
@@ -143,6 +151,7 @@ impl SessionOutput {
             change_set,
             events,
             table_change_set,
+            aggregator_change_set,
         } = self;
 
         let mut write_set_mut = WriteSetMut::new(Vec::new());
@@ -177,6 +186,10 @@ impl SessionOutput {
                     write_set_mut.push((state_key, WriteOp::Deletion))
                 }
             }
+        }
+
+        for op in aggregator_change_set {
+            write_set_mut.push(op);
         }
 
         let write_set = write_set_mut
