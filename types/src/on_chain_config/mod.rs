@@ -163,7 +163,7 @@ pub trait OnChainConfig: Send + Sync + DeserializeOwned {
 }
 
 pub fn new_epoch_event_key() -> EventKey {
-    EventKey::new_from_address(&config_address(), 5)
+    EventKey::new(5, config_address())
 }
 
 pub fn struct_tag_for_config(config_name: Identifier) -> StructTag {
@@ -234,7 +234,10 @@ impl Default for ConfigurationResource {
         Self {
             epoch: 0,
             last_reconfiguration_time: 0,
-            events: EventHandle::new_from_address(&crate::account_config::aptos_root_address(), 16),
+            events: EventHandle::new(
+                EventKey::new(16, crate::account_config::aptos_root_address()),
+                0,
+            ),
         }
     }
 }
