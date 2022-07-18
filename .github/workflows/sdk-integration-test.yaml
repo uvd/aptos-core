@@ -10,7 +10,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: high-perf-docker
     permissions:
       contents: read
       id-token: write
@@ -31,7 +31,7 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - run: docker-compose up --detach
+      - run: docker-compose up
         working-directory: docker/compose/validator-testnet
         env:
           IMAGE_TAG: ${{ inputs.GIT_SHA }}
